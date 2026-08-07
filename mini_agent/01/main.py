@@ -2,10 +2,15 @@
 import sys
 from config import BASE_URL, MODEL, SYSTEM_PROMPT
 from agent import agent_loop
+from hooks import trigger_hooks, init_default_hooks
 
 def main():
+    # 显式初始化 Agent 默认内置钩子注册表
+    init_default_hooks()
+
     print("=" * 60)
     print("🤖 欢迎使用 Mini Agent (模块化版本)")
+
     print(f"🔗 专属服务地址: {BASE_URL}")
     print(f"🧠 当前驱动模型: {MODEL}")
     print("💡 提示：输入任务需求（如：写一个 fib 函数并用 pytest 测试），输入 q 退出")
@@ -27,8 +32,13 @@ def main():
             print("退出 Mini Agent。")
             break
 
+        # 🪝 触发 UserPromptSubmit 钩子（支持输入清洗、预处理或改写）
+        prompt_override = trigger_hooks("UserPromptSubmit", user_input)
+        final_input = prompt_override if prompt_override is not None else user_input
+
         # 压入用户需求
-        history.append({"role": "user", "content": user_input})
+        history.append({"role": "user", "content": final_input})
+
         
         # 调起 Agent 主循环处理
         agent_loop(history)
@@ -36,3 +46,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

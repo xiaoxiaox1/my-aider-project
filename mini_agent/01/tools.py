@@ -94,6 +94,84 @@ def run_get_file_tree(path:str='.'):
     except Exception as e:
         return f"获取目录树失败: {e}"
 
+DENY_LIST = ["rm -rf /", "sudo", "shutdown", "reboot", "mkfs", "dd if=", "> /dev/sda"]
+
+def check_deny_list(command: str) -> str | None:
+    for pattern in DENY_LIST:
+        if pattern in command:
+            return f"Blocked: '{pattern}' is on the deny list"
+    return None
+
+PERMISSION_RULES = [
+    {"tools": ["read_file", "write_file", "edit_file"],
+     "check": lambda args: not (WORKDIR / args.get("path", "")).resolve().is_relative_to(WORKDIR),
+     "message": "Writing outside workspace"},
+    {"tools": ["bash"],
+     "check": lambda args: any(kw in args.get("command", "") for kw in ["rm ", "> /etc/", "chmod 777"]),
+     "message": "Potentially destructive command"},
+]
+
+def check_rules(tool_name: str, args: dict) -> str | None:
+    for rule in PERMISSION_RULES:
+        if tool_name in rule["tools"] and rule["check"](args):
+            return rule["message"]
+    return None
+
+# Gate 3: User approval — wait for confirmation after rule match
+def ask_user(tool_name: str, args: dict, reason: str) -> str:
+    print(f"\n\033[33m⚠  {reason}\033[0m")
+    print(f"   Tool: {tool_name}({args})")
+    choice = input("   Allow? [y/N] ").strip().lower()
+    return "allow" if choice in ("y", "yes") else "deny"
+
+
+def check_permission(block) -> bool:
+    if block.name == "bash":
+        reason = check_deny_list(block.input.get("command", ""))
+        if reason:
+            print(f"\n\033[31m⛔ {reason}\033[0m")
+            return False
+    reason = check_rules(block.name, block.input)
+    if reason:
+        decision = ask_user(block.name, block.input, reason)
+        if decision == "deny":
+            return False
+    return True
+
+
+
+# 核心内存 Todo 状态
+CURRENT_TODOS: list[dict] = []
+
+def run_todo_write(todos: list[dict]) -> str:
+    """创建或更新当前的 Todo 计划任务清单，并在终端渲染可视化列表"""
+    global CURRENT_TODOS
+    CURRENT_TODOS = todos
+
+    if not todos:
+        return "Todo 清单已清空。"
+
+    rendered = ["\n\033[1;36m[TODO] [Agent 代办任务计划清单]\033[0m"]
+    for idx, item in enumerate(todos, 1):
+        content = item.get("content") or item.get("description") or ""
+        status = item.get("status", "pending").lower()
+
+        if status in ("completed", "done", "finished"):
+            icon = "\033[32m[v]\033[0m"
+            text_style = "\033[90m"
+        elif status in ("in_progress", "running"):
+            icon = "\033[33m[>]\033[0m"
+            text_style = "\033[1;33m"
+        else:
+            icon = "\033[37m[ ]\033[0m"
+            text_style = "\033[0m"
+
+        rendered.append(f"  {idx}. {icon} {text_style}{content}\033[0m")
+
+    print("\n".join(rendered))
+    return f"Todo 清单成功更新，当前包含 {len(todos)} 项任务。"
+
+
 # ── 2. 工具 Schema 与 路由注册 ──
 
 TOOLS = [
@@ -147,7 +225,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "运行一个终端 / Shell 命令，例如运行 python 脚本、pytest 测试、pip 命令或查看目录内容。",
+            "description": "运行一个终端 / Shell 命令，例如运行 python 脚本、pytest 测试、pip 命令或任意 Git 版本控制命令 (如 git status, git diff, git commit 等)。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -170,6 +248,35 @@ TOOLS = [
                 "required": []
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_write",
+            "description": "创建或更新 Agent 内部多步骤任务计划清单 (Todo List)。用于复杂任务拆解与进度状态追踪。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "description": "Todo 任务项列表",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string", "description": "任务具体描述，如 '读取配置文件' 或 '修复单测报错'"},
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                    "description": "任务当前状态: pending (待处理), in_progress (进行中), completed (已完成)"
+                                }
+                            },
+                            "required": ["content", "status"]
+                        }
+                    }
+                },
+                "required": ["todos"]
+            }
+        }
     }
 ]
 
@@ -178,5 +285,9 @@ TOOL_HANDLERS = {
     "read_file": run_read,
     "write_file": run_write,
     "edit_file": run_edit,
-    "bash": run_bash
+    "bash": run_bash,
+    "todo_write": run_todo_write
 }
+
+
+
